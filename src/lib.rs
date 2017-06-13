@@ -4,31 +4,28 @@ extern crate specs;
 use std::{thread, time};
 use std::sync::mpsc;
 
-pub type Delta = f32;
-pub type Planner = specs::Planner<Delta>;
+pub type Planner<'a, 'b> = specs::DispatcherBuilder<'a, 'b>;
 
-pub const DRAW_PRIORITY: specs::Priority = 10;
 pub const DRAW_NAME: &'static str = "draw";
 
 
-pub trait Init: 'static {
+pub trait Init<'a, 'b>: 'static {
     type Shell: 'static + Send;
-    fn start(self, &mut Planner) -> Self::Shell;
-    fn proceed(_: &mut Self::Shell, _: &mut Planner, _: Delta) -> bool { true }
+    fn start(self, Planner<'a, 'b>) -> (Self::Shell, Planner<'a, 'b>);
+    fn proceed(_: &mut Self::Shell) -> bool { true }
 }
 
-struct App<I: Init> {
+struct App<'a, 'b, I: Init<'a, 'b>> {
     shell: I::Shell,
-    planner: Planner,
     last_time: time::Instant,
 }
 
-impl<I: Init> App<I> {
+impl<'a, 'b, I: Init<'a, 'b>> App<'a, 'b, I> {
     fn tick(&mut self) -> bool {
         let elapsed = self.last_time.elapsed();
         self.last_time = time::Instant::now();
         let delta = elapsed.subsec_nanos() as f32 / 1e9 + elapsed.as_secs() as f32;
-        I::proceed(&mut self.shell, &mut self.planner, delta)
+        I::proceed(&mut self.shell)
     }
 }
 
@@ -37,8 +34,9 @@ struct ChannelPair<R: gfx::Resources, C: gfx::CommandBuffer<R>> {
     sender: mpsc::Sender<gfx::Encoder<R, C>>,
 }
 
-pub trait Painter<R: gfx::Resources>: 'static + Send {
-    fn draw<'a, C>(&mut self, arg: specs::RunArg, &mut gfx::Encoder<R, C>) where
+pub trait Painter<'a, R: gfx::Resources>: 'static + Send {
+    type SystemData: specs::SystemData<'a>;
+    fn draw<C>(&mut self, sys_data: Self::SystemData, &mut gfx::Encoder<R, C>) where
             C: gfx::CommandBuffer<R>;
 }
 
@@ -47,20 +45,22 @@ struct DrawSystem<R: gfx::Resources, C: gfx::CommandBuffer<R>, P> {
     channel: ChannelPair<R, C>,
 }
 
-impl<R, C, P> specs::System<Delta> for DrawSystem<R, C, P>
+impl<'a, R, C, P> specs::System<'a> for DrawSystem<R, C, P>
 where
     R: 'static + gfx::Resources,
     C: 'static + Send + gfx::CommandBuffer<R>,
-    P: Painter<R>,
+    P: Painter<'a, R>,
 {
-    fn run(&mut self, arg: specs::RunArg, _: Delta) {
+    type SystemData = P::SystemData;
+
+    fn run(&mut self, sys_data: Self::SystemData) {
         // get a new command buffer
         let mut encoder = match self.channel.receiver.recv() {
             Ok(r) => r,
             Err(_) => return,
         };
         // render entities
-        self.painter.draw(arg, &mut encoder);
+        self.painter.draw(sys_data, &mut encoder);
         // done
         let _ = self.channel.sender.send(encoder);
     }
@@ -83,11 +83,11 @@ impl<'a, D: 'a + gfx::Device> Drop for Swing<'a, D> {
 }
 
 impl<D: gfx::Device> Pegasus<D> {
-    pub fn new<F, I, P>(init: I, device: D, painter: P, mut com_factory: F)
+    pub fn new<'a, 'b, F, I, P>(init: I, device: D, painter: P, mut com_factory: F)
                -> Pegasus<D> where
-        I: Init,
+        I: Init<'a, 'b>,
         D::CommandBuffer: 'static + Send, //TODO: remove when gfx forces these bounds
-        P: Painter<D::Resources>,
+        P: for<'c> Painter<'c, D::Resources>,
         F: FnMut() -> D::CommandBuffer,
     {
         let (app_send, dev_recv) = mpsc::channel();
@@ -108,12 +108,13 @@ impl<D: gfx::Device> Pegasus<D> {
                 },
             };
             let w = specs::World::new();
-            let mut plan = specs::Planner::new(w, 4);
-            plan.add_system(draw_sys, DRAW_NAME, DRAW_PRIORITY);
-            let shell = init.start(&mut plan);
+            let mut dispatcher = specs::DispatcherBuilder::new()
+                .add(draw_sys, DRAW_NAME, &[]);
+            let (shell, dispatcher) = init.start(dispatcher);
+            dispatcher.build().dispatch(&mut w.res);
+
             App::<I> {
                 shell: shell,
-                planner: plan,
                 last_time: time::Instant::now(),
             }
         };

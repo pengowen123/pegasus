@@ -10,10 +10,10 @@ authors = ["Dzmitry Malyshau <kvarkus@gmail.com>"]
 [lib]
 
 [dependencies]
-gfx = "0.14"
-specs = "0.7"
+gfx = "0.16"
+specs = "0.9"
 
 [dev_dependencies]
 env_logger = "0.3"
-gfx_window_glutin = "0.14"
-glutin = "0.7"
+gfx_window_glutin = "0.16"
+glutin = "0.8.1"
